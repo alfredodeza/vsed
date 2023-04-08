@@ -1,4 +1,90 @@
 use std::error::Error;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use tempfile::NamedTempFile;
+
+fn apply_change(line: &str) -> bool {
+    println!("Apply? y/n -> {}", line);
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let result: bool = match input.trim().to_lowercase().as_str() {
+        "y" => true,
+        "n" => false,
+        _ => {
+            println!("Invalid input, please enter y or n");
+            apply_change(line)
+        }
+    };
+    // use the result variable to return a boolean
+    result
+}
+
+
+// create a function that opens a file path and returns a BufReader
+fn open(path: &str) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
+    // guard against any error from opening the file
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => return Err(e.into()), // convert the error to a Box<dyn Error>
+    };
+    let buffer = Box::new(BufReader::new(file));
+    Ok(buffer)
+}
+
+fn lazy_read_lines(path: &str) -> std::io::Result<impl Iterator<Item = std::io::Result<String>>> {
+    let buffer = open(path).unwrap();
+
+    let lines = buffer
+        .lines()
+        .map(|result| result.map(|line| line.trim().to_string()));
+    Ok(lines)
+}
+
+fn clear_screen() {
+    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+}
+
+
+// create a function that reads a file and loops over each line. The function will need to keep track of preceeding and following lines when there is a match. The function will accept a file path and a VimSearch struct which contains the search pattern, replacement, and flags
+fn read_file(path: String, search: &VimSearch) -> Result<(), Box<dyn Error>> {
+    let tmp_file = NamedTempFile::new()?;
+    let tmp_file_path = tmp_file.path().to_str().unwrap().to_owned();
+    let mut line_number = 0;
+    {
+        let mut writer = BufWriter::new(&tmp_file);
+
+        println!("Temp file path: {}", tmp_file_path);
+        clear_screen();
+        // loop over lines in the file and only print the lines that match the search pattern which may be using a regex
+        for line in lazy_read_lines(&path)? {
+            
+            let line = line?;
+            line_number += 1;
+            if line.contains(&search.search_pattern) {
+                let replaced = line.replace(&search.search_pattern, &search.replacement);
+                if apply_change(&replaced) {
+                    // append the line to the temporary file from tmp_file which is a NamedTempFile
+                    // use the write method on the file handle
+                    writeln!(writer, "{}", replaced)?;
+                    clear_screen();
+                    
+                } else {
+                    writeln!(writer, "{}", line)?;
+                    clear_screen();
+                }
+            } else {
+                println!("Line {line_number}: {line}");
+                writeln!(writer, "{}", line)?;
+            }
+            writer.flush()?;
+        }
+
+    }
+    tmp_file.persist(tmp_file_path.clone())?;    
+    println!("Temp file path: {}", tmp_file_path);
+    Ok(())
+}
 
 // Vim search String parsing
 #[derive(Debug)]
@@ -30,6 +116,7 @@ impl VimSearch {
             string: search,
         })
     }
+
     fn get_delimeter(search_string: &str) -> Result<char, Box<dyn Error>> {
         if !search_string.starts_with("s") {
             return Err("Search string must start with 's'".into());
@@ -55,10 +142,10 @@ impl VimSearch {
 pub struct Options {
     pub pattern: String,
     pub replacement: String,
-    pub files: Vec<String>,
+    pub paths: Vec<String>,
     pub dry_run: bool,
+    pub context: usize,
 }
-
 
 fn generate_paths(pattern: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let mut paths = vec![];
@@ -71,7 +158,6 @@ fn generate_paths(pattern: &str) -> Result<Vec<String>, Box<dyn Error>> {
 }
 
 pub fn parse_args() -> Result<Options, Box<dyn Error>> {
-    println!("Parsing args");
     let matches = clap::App::new("vsed")
         .version("0.0.1")
         .author("Alfredo Deza")
@@ -109,6 +195,7 @@ pub fn parse_args() -> Result<Options, Box<dyn Error>> {
             Err(e) => return Err(e),
         };
     } else {
+        // convert them to Vec<String>
         files = files_from_arguments.iter().map(|s| s.to_string()).collect();
     };
 
@@ -117,8 +204,9 @@ pub fn parse_args() -> Result<Options, Box<dyn Error>> {
         //replacement: matches.value_of("replacement pattern").unwrap().to_string(),
         replacement: "".to_string(),
         //files: matches.values_of("files").unwrap().map(|s| s.to_string()).collect(),
-        files: files,
+        paths: files,
         dry_run: matches.is_present("dry-run"),
+        context: 3,
     })
 }
 
@@ -127,5 +215,8 @@ pub fn run(options: Options) -> Result<(), Box<dyn Error>> {
     println!("{:?}", options);
     let search = VimSearch::new(options.pattern)?;
     println!("{:?}", search);
+    for path in options.paths {
+        read_file(path, &search)?;
+    }
     Ok(())
 }
